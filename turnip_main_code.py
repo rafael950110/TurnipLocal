@@ -373,6 +373,12 @@ def generate_algorythm(
     df = generate_dfex(df, judge_days, judge_border)
     df_column = [v for v in df.columns.tolist() if v not in judgeColList]
     
+    logic01 = 0.97 <= df.iloc[-1][COL_NAME_Close] / df.iloc[-1]["終値75日平均"] <= 1.03
+    logic02 = df.iloc[-1]["出来高5日平均"] >= 200000000
+    if logic01 and logic02 :
+        with open(f'{RESULT_PATH}/resultNewLogic.csv', 'a', encoding="utf_8_sig") as f:
+            writer(f).writerow([code, tuning_name, df.iloc[-1][COL_NAME_Close] / df.iloc[-1]["終値75日平均"], df.iloc[-1]["出来高5日平均"]])
+    
     for target in judgeColList :
         try :
             clf      = make_decision_tree(df, judgeColList, removeColList, target, min_samples_leaf, max_depth)
@@ -384,10 +390,14 @@ def generate_algorythm(
             with open(node_path, mode='w') as f: f.write(json.dumps(nodes))
                 
 def step01(cdlst, paths, parameters, lists, overwrite, newdir, dlonly) :
-    for path in directory_paths: if not os.path.isdir(paths) : os.makedirs(paths)
+    for path in paths.values():
+        if not os.path.isdir(path) : os.makedirs(path)
 
     for_start = time.time()
     
+    with open(f'{paths["RESULT_PATH"]}/resultNewLogic.csv', 'w', encoding="utf_8_sig") as f:
+        writer(f).writerow(["code", "tuning_name", "75+-3%", "5ave>0.2bn"])
+
     for code in cdlst:
 
         # プログレスバーの表示
@@ -422,7 +432,6 @@ def step01(cdlst, paths, parameters, lists, overwrite, newdir, dlonly) :
         if sleep > 0 : time.sleep(sleep)
 
 def step02(tuning_name, holding_border, profit_border, learn_index, sim_num, judge_days, judge_border, NODES_PATH, CSV_PATH, RESULT_PATH) :
-    if not os.path.exists(RESULT_PATH) : os.makedirs(RESULT_PATH)
 
     for simnum in sim_num :
         filepath = f'{RESULT_PATH}/step02_result_{tuning_name}_{simnum}.csv'
@@ -433,7 +442,6 @@ def step02(tuning_name, holding_border, profit_border, learn_index, sim_num, jud
     nodes_path = f'{NODES_PATH}/nodes{tuning_name}'
     files = os.listdir(nodes_path)
     cdlst = sorted([f for f in files if os.path.isfile(os.path.join(nodes_path, f)) if "json" in f ])
-#     cdlst=[ "3681_rise.json", "3110_rise.json", "6197_rise.json", "3921_rise.json", "6191_rise.json", "1712_rise.json" ]
     
     for node_filename in cdlst :
 
