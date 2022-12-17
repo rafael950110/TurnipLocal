@@ -333,48 +333,7 @@ def generate_algorythm(
     nodes_path = f'{NODES_PATH}/nodes{tuning_name}'
     if not os.path.isdir(nodes_path) : os.makedirs(nodes_path)
     
-    df = pd.read_csv(f'{CSV_PATH}/{code}.csv', names=["Date",COL_NAME_Open,COL_NAME_High,COL_NAME_Low,"Close_origin",COL_NAME_Volume,COL_NAME_Close])
-    if 'Date' not in df.columns :
-        print('Error: Date column not found')
-    df = df.iloc[-1:learn_index:-1] if df.iloc[1]["Date"] > df.iloc[-1]["Date"] else df.iloc[1:(-1*learn_index):]
-
-    for after, befores in renameColList.items():
-        for before in befores:
-            if before in df.columns:
-                df = df.rename(columns={before : after})
-    
-    unlisted_day = [(datetime.datetime.strptime(yesterday, '%Y/%m/%d') - datetime.datetime.strptime(today, '%Y/%m/%d')).days > 366 for yesterday, today in list(zip(df.Date[0:], df.Date[1:]))]
-    unlisted_result = unlisted_day.index(True) if any(unlisted_day) else -1
-
-    # 再上場後のみのデータで学習
-    if unlisted_result >= learn_num_min : df = df.iloc[:unlisted_result+1,:]
-
-    # 未上場期間１年以上 && 再上場後の件数不足
-    if learn_num_min > unlisted_result > -1 : return -1
-
-    # 学習データが確保できない場合はスキップする
-    if len(df) < learn_num_min: return -1
-
-    # 終値と調整後終値が違う場合は、その比率に基づいて他の値（始値、高値、低値、出来高）を修正する
-    for row in df.itertuples():
-        if float(row.Close) / float(row.Close_origin) != 1.0 :
-            ratio = float(row.Close) / float(row.Close_origin)
-            df.loc[row.Index, COL_NAME_Open]   = float(row.Open)   * ratio
-            df.loc[row.Index, COL_NAME_High]   = float(row.High)   * ratio
-            df.loc[row.Index, COL_NAME_Low]    = float(row.Low)    * ratio
-            df.loc[row.Index, COL_NAME_Volume] = float(row.Volume) / ratio
-
-    df = df.iloc[:,[i for i,v in enumerate(df.columns.tolist()) if v not in removeColList]]
-
-    df[COL_NAME_Open]   = pd.to_numeric(df[COL_NAME_Open],   errors='coerce').fillna(0).astype(int)
-    df[COL_NAME_High]   = pd.to_numeric(df[COL_NAME_High],   errors='coerce').fillna(0).astype(int)
-    df[COL_NAME_Low]    = pd.to_numeric(df[COL_NAME_Low],    errors='coerce').fillna(0).astype(int)
-    df[COL_NAME_Volume] = pd.to_numeric(df[COL_NAME_Volume], errors='coerce').fillna(0).astype(int)
-    df[COL_NAME_Close]  = pd.to_numeric(df[COL_NAME_Close],  errors='coerce').fillna(0).astype(int)
-
-    df = df.rename(columns=lambda s: s.replace(' ', ''), index=lambda s: s)
-    df = generate_dfex(df, judge_days, judge_border)
-    df_column = [v for v in df.columns.tolist() if v not in judgeColList]
+    df, df_column = reformat_df(code, CSV_PATH, learn_index, learn_num_min, judge_days, judge_border, judgeColList, removeColList, renameColList, RESULT_PATH)
     
     for target in judgeColList :
         try :
@@ -391,6 +350,9 @@ def step01(cdlst, paths, parameters, lists, overwrite, newdir, dlonly, generateo
         if not os.path.isdir(path) : os.makedirs(path)
 
     for_start = time.time()
+    
+    with open(f'{paths["RESULT_PATH"]}/resultNewLogic.csv', 'w', encoding="utf_8_sig") as f:
+        writer(f).writerow(["code", "tuning_name", "75+-3%", "5ave>0.2bn"])
 
     for code in cdlst:
 
@@ -420,7 +382,6 @@ def step01(cdlst, paths, parameters, lists, overwrite, newdir, dlonly, generateo
             start = -5
             
         if not dlonly :
-#             generate_algorythm(**parameters[0], **paths, **lists, code=code)
             _ = joblib.Parallel(n_jobs=-1)(joblib.delayed(generate_algorythm)(**parameter, **paths, **lists, code=code) for parameter in parameters)
 
         sleep = 5-(time.time()-start)
@@ -437,9 +398,6 @@ def step02(tuning_name, holding_border, profit_border, learn_index, sim_num, jud
     nodes_path = f'{NODES_PATH}/nodes{tuning_name}'
     files = os.listdir(nodes_path)
     cdlst = sorted([f for f in files if os.path.isfile(os.path.join(nodes_path, f)) if "json" in f ])
-    
-    with open(f'{RESULT_PATH}/resultNewLogic.csv', 'w', encoding="utf_8_sig") as f:
-        writer(f).writerow(["code", "tuning_name", "close", "75ave", "75+-1%", "5ave>0.2bn"])
     
     for node_filename in cdlst :
 
@@ -473,16 +431,6 @@ def step02(tuning_name, holding_border, profit_border, learn_index, sim_num, jud
 
         df = df.rename(columns=lambda s: s.replace(' ', ''), index=lambda s: s)
         df = generate_dfex(df, judge_days, judge_border)
-        
-        close      = df.iloc[-1][COL_NAME_Close]
-        close75ave = df.iloc[-1]["終値75日平均"]
-        trade25ave = df.iloc[-1]["取引量(出来高*株価(終値))25日平均"]
-
-        logic01 = 0.99 <= close / close75ave <= 1.01
-        logic02 = trade25ave >= 500000000
-        if logic01 and logic02 :
-            with open(f'{RESULT_PATH}/resultNewLogic.csv', 'a', encoding="utf_8_sig") as f:
-                writer(f).writerow([code, tuning_name, close, close75ave, (close75ave / close75ave) , trade25ave ])
  
         for simnum in sim_num :
             judge = node_filename.split("_")[1][:4]
@@ -493,20 +441,46 @@ def step02(tuning_name, holding_border, profit_border, learn_index, sim_num, jud
             trans_vol = df.at[df.index[-1], "取引量(出来高*株価(終値))25日平均"]
             filepath = f'{RESULT_PATH}/step02_result_{tuning_name}_{simnum}.csv'
             stock_summary = summarize_stock(code, stocks, judge.upper(), entry, trans_vol, filepath)    
+            
 
-def reformat_df(df, judgeColList, removeColList, renameColList) :
+def reformat_df(code, CSV_PATH, learn_index, learn_num_min, judge_days, judge_border, judgeColList, removeColList, renameColList, RESULT_PATH) :
 
-    # Dateカラムがなく、indexにDate情報が含まれていれば、indexをDateカラムとして %Y/%m/%d で保存
-    df.reset_index(inplace=True)
-    df = df.rename(columns={'index': 'Date'})
-    df['Date'] = df['Date'].astype(str).map(lambda date: date.replace('-','/'))
-    strptime = datetime.datetime.strptime
-    
-    # カラム名で置き換えがあれば実行
+
+    df = pd.read_csv(f'{CSV_PATH}/{code}.csv', names=["Date",COL_NAME_Open,COL_NAME_High,COL_NAME_Low,"Close_origin",COL_NAME_Volume,COL_NAME_Close])
+    if 'Date' not in df.columns :
+        print('Error: Date column not found')
+    df = df.iloc[-1:learn_index:-1] if df.iloc[1]["Date"] > df.iloc[-1]["Date"] else df.iloc[1:(-1*learn_index):]
     for after, befores in renameColList.items():
         for before in befores:
             if before in df.columns:
                 df = df.rename(columns={before : after})
+                
+#     # Dateカラムがなく、indexにDate情報が含まれていれば、indexをDateカラムとして %Y/%m/%d で保存
+#     df.reset_index(inplace=True)
+#     df = df.rename(columns={'index': 'Date'})
+#     df['Date'] = df['Date'].astype(str).map(lambda date: date.replace('-','/'))
+#     strptime = datetime.datetime.strptime
+#
+#     # カラム名で置き換えがあれば実行
+#     for after, befores in renameColList.items():
+#         for before in befores:
+#             if before in df.columns:
+#                 df = df.rename(columns={before : after})
+
+    for yesterday, today in list(zip(df.Date[0:], df.Date[1:])) :
+        yesterday_time = datetime.datetime.strptime(yesterday, '%Y/%m/%d')
+        today_time     = datetime.datetime.strptime(today, '%Y/%m/%d')
+        unlisted_day = [(yesterday_time - today_time).days > 366] 
+    unlisted_result = unlisted_day.index(True) if any(unlisted_day) else -1
+
+    # 再上場後のみのデータで学習
+    if unlisted_result >= learn_num_min : df = df.iloc[:unlisted_result+1,:]
+
+    # 未上場期間１年以上 && 再上場後の件数不足
+    if learn_num_min > unlisted_result > -1 : return -1
+
+    # 学習データが確保できない場合はスキップする
+    if len(df) < learn_num_min: return -1
 
     # 終値と調整後終値が違う場合は、その比率に基づいて他の値（始値、高値、低値、出来高）を修正する
     for row in df.itertuples():
@@ -516,15 +490,30 @@ def reformat_df(df, judgeColList, removeColList, renameColList) :
             df.loc[row.Index, COL_NAME_High]   = float(row.High)   * ratio
             df.loc[row.Index, COL_NAME_Low]    = float(row.Low)    * ratio
             df.loc[row.Index, COL_NAME_Volume] = float(row.Volume) / ratio
-    df = df.iloc[:,[i for i,v in enumerate(df.columns.tolist()) if v != 'Close_origin']]
-    
+
+    df = df.iloc[:,[i for i,v in enumerate(df.columns.tolist()) if v not in removeColList]]
+
     df[COL_NAME_Open]   = pd.to_numeric(df[COL_NAME_Open],   errors='coerce').fillna(0).astype(int)
     df[COL_NAME_High]   = pd.to_numeric(df[COL_NAME_High],   errors='coerce').fillna(0).astype(int)
     df[COL_NAME_Low]    = pd.to_numeric(df[COL_NAME_Low],    errors='coerce').fillna(0).astype(int)
     df[COL_NAME_Volume] = pd.to_numeric(df[COL_NAME_Volume], errors='coerce').fillna(0).astype(int)
     df[COL_NAME_Close]  = pd.to_numeric(df[COL_NAME_Close],  errors='coerce').fillna(0).astype(int)
+
+    df = df.rename(columns=lambda s: s.replace(' ', ''), index=lambda s: s)
+    df = generate_dfex(df, judge_days, judge_border)
+    df_column = [v for v in df.columns.tolist() if v not in judgeColList]
     
-    return df
+    close      = df.iloc[1][COL_NAME_Close]
+    close75ave = df.iloc[1]["終値75日平均"]
+    trade25ave = df.iloc[1]["取引量(出来高*株価(終値))25日平均"]
+    
+    logic01 = 0.99 <= close / close75ave <= 1.01
+    logic02 = trade25ave >= 200000000
+    if logic01 and logic02 :
+        with open(f'{RESULT_PATH}/resultNewLogic.csv', 'a', encoding="utf_8_sig") as f:
+            writer(f).writerow([code, (close / close75ave) if logic01 else '-', trade25ave if logic02 else '-'])
+            
+    return df, df_column
 
 def unlisted_check() :
     # 未上場の期間が１年以上あるか判定 
@@ -542,121 +531,3 @@ def unlisted_check() :
 
     df = df.iloc[:,[i for i,v in enumerate(df.columns.tolist()) if v != 'Date']]
     df = df.rename(columns=lambda s: s.replace(' ', ''), index=lambda s: s)
-    
-    
-def generate_algorythm_useapi(
-        code, df, tuning_name, learn_index, learn_num_min,
-        judge_days, judge_border, min_samples_leaf, max_depth, criteria,
-        judgeColList, removeColList, renameColList ) :
-
-    strptime = datetime.datetime.strptime
-    
-    # 日付で昇順に
-    df = df.iloc[-1:learn_index:-1] if strptime(df.iloc[1]["Date"], '%Y/%m/%d') > strptime(df.iloc[-1]["Date"], '%Y/%m/%d') else df.iloc[1:(-1*learn_index):]
-    
-    # 未上場の期間が１年以上あるか判定 
-    unlisted_day = [(strptime(yesterday, '%Y/%m/%d') - strptime(today, '%Y/%m/%d')).days > 366 for yesterday, today in list(zip(df.Date[0:], df.Date[1:]))]
-    unlisted_result = unlisted_day.index(True) if any(unlisted_day) else -1
-
-    # 再上場後のみのデータで学習
-    if unlisted_result >= learn_num_min : df = df.iloc[:unlisted_result+1,:]
-
-    # 未上場期間１年以上 && 再上場後の件数不足
-    if learn_num_min > unlisted_result > -1 : return {}
-
-    # 学習データが確保できない場合はスキップする
-    if len(df) < learn_num_min: return {}
-
-    df = df.iloc[:,[i for i,v in enumerate(df.columns.tolist()) if v != 'Date']]
-    df = df.rename(columns=lambda s: s.replace(' ', ''), index=lambda s: s)
-    df = generate_dfex(df, judge_days, judge_border)
-    df_column = [v for v in df.columns.tolist() if v not in judgeColList]
-    
-    nodess = {}
-    for target in judgeColList :
-        try :
-            clf      = make_decision_tree(df, judgeColList, removeColList, target, min_samples_leaf, max_depth)
-            dot_data = visualiz_decision_tree(clf, df_column)
-            nodes    = get_good_nodes(dot_data, criteria)
-        except: pass
-        else  :
-            target = "fall" if judgeColList.index(target) else "rise"
-            if nodes != {} : nodess.update({target : nodes})
-    return nodess
-
-def step01_useapi(cdlst, parameters, lists, overwrite, newdir, dlonly) :
-
-    for_start = time.time()
-    nodesss = { p["tuning_name"] : {} for p in parameters }
-    cdlst = ["3916", "4516", "7915"]
-    for code in cdlst:
-
-        df = pdr.get_data_yahoo(f'{code}.T')
-        print("\r")
-    
-        # -- 計測開始 --
-        start = time.time()
-        
-        # プログレスバーの表示
-        total = len(cdlst)
-        ind = cdlst.index(code) + 1
-        bar = math.floor(ind / total * 50)
-        sec = datetime.timedelta(seconds=(time.time()-for_start))
-#         print(f"\r{ind:>4}/{total}: [{''.join(['-' for _ in range(bar)]):<50}] {ind/total*100:>6.2f}%  {sec}", end='')
-
-        df = reformat_df(df, **lists)
-        nodess = joblib.Parallel(n_jobs=-1)(joblib.delayed(generate_algorythm_useapi)(**parameter, **lists, code=code, df=df) for parameter in parameters)
-
-        if any([ len(nodes) for nodes in nodess]) :
-            for p in parameters :
-                nodesss[p["tuning_name"]].update({ code : nodes for nodes in nodess if len(nodes) > 0 })
-                nodesss[p["tuning_name"]][code].update({ 'df' : df })
-
-        # -- 計測終了 --
-        sleep = 5-(time.time()-start)
-        if sleep > 0 : time.sleep(sleep)
-    return nodesss
-
-
-def step02_useapi(tuning_name, holding_border, profit_border, learn_index, sim_num, judge_days, judge_border, RESULT_PATH, nodes) :
-    if not os.path.exists(RESULT_PATH) : os.makedirs(RESULT_PATH)
-
-    for simnum in sim_num :
-        filepath = f'{RESULT_PATH}/step02_result_{tuning_name}_{simnum}.csv'
-        with open(filepath, 'w', encoding="utf_8_sig") as f:
-            writer(f).writerow(["銘柄", "上昇/下落", "取引数", "上昇", "下落", "購入", "売却", "差額", "平均利益率", "保持日数", "獲得総利益", "有効指数", "エントリー"])
-
-    cdlst = sorted([f for f in files if os.path.isfile(os.path.join(nodes_path, f)) if "json" in f ])
-    
-    for node_filename in cdlst :
-
-        path = f'{nodes_path}/{node_filename}'
-        code = node_filename.split("_")[0]
-
-        df = pd.read_csv(f'{CSV_PATH}/{code}.csv', names=["Date",COL_NAME_Open,COL_NAME_High,COL_NAME_Low,"Close_origin",COL_NAME_Volume,COL_NAME_Close])
-        df = df.iloc[max(sim_num)+100:0:-1] if df.iloc[1]["Date"] > df.iloc[-1]["Date"] else df.iloc[-1*(max(sim_num)+100)::]
-        
-        # 終値と調整後終値が違う場合は、その比率に基づいて他の値（始値、高値、低値、出来高）を修正する
-        for row in df.itertuples():
-            ratio = float(row.Close) / float(row.Close_origin)
-            if ratio != 1.0 :                
-                df.loc[row.Index, COL_NAME_Open]   = float(row.Open)   * ratio
-                df.loc[row.Index, COL_NAME_High]   = float(row.High)   * ratio
-                df.loc[row.Index, COL_NAME_Low]    = float(row.Low)    * ratio
-                df.loc[row.Index, COL_NAME_Volume] = float(row.Volume) / ratio
-
-        df[COL_NAME_Open]   = pd.to_numeric(df[COL_NAME_Open],   errors='coerce').fillna(0).astype(int)
-        df[COL_NAME_High]   = pd.to_numeric(df[COL_NAME_High],   errors='coerce').fillna(0).astype(int)
-        df[COL_NAME_Low]    = pd.to_numeric(df[COL_NAME_Low],    errors='coerce').fillna(0).astype(int)
-        df[COL_NAME_Volume] = pd.to_numeric(df[COL_NAME_Volume], errors='coerce').fillna(0).astype(int)
-        df[COL_NAME_Close]  = pd.to_numeric(df[COL_NAME_Close],  errors='coerce').fillna(0).astype(int)
-
-        df = df.rename(columns=lambda s: s.replace(' ', ''), index=lambda s: s)
-        df = generate_dfex(df, judge_days, judge_border)
- 
-        for simnum in sim_num :
-            df = df.iloc[-1*simnum::]
-            entry, _ = get_is_rising(df.iloc[-1], nodes)
-            stocks   = simulation(nodes, df, holding_border, profit_border)
-            if not len(stocks) : continue
-            stock_summary = summarize_stock(code, stocks, node_filename.split("_")[1][:4].upper(), entry, filepath)
